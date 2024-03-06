@@ -21,7 +21,7 @@ from ghidra.app.plugin.core.analysis import ConstantPropagationAnalyzer
 
 from ghidra.util.classfinder import ClassSearcher
 
-from .ACceptedAutomation.ahocorasick import AhoCorasick
+from .AhoCorasick import AhoCorasick
 
 
 __SEARCH_STRING_CURRENT_PROGRAM: Program = getCurrentProgram()
@@ -51,11 +51,82 @@ def __init():
 
     __SYMBOL_PROPOGATOR = SymbolicPropogator(__SEARCH_STRING_CURRENT_PROGRAM)
     __SYMBOL_PROPOGATOR.setParamRefCheck(True)
-    
-def searchBytesAC(words: Iterable[bytes]) -> list[tuple[bytes, Address]]:
-    
 
-    AC = AhoCorasick(words)
+"""
+    internal API
+"""
+
+def __searchCall(start: int) -> tuple[Function, int] | None:
+    """
+        从某个地址开始寻找一条call指令
+    """
+    
+    inst: Instruction = getInstructionAt(toAddr(start))
+    if str(__SEARCH_STRING_CURRENT_PROGRAM.getLanguageID().getIdAsString()).startswith('MIPS'):
+        """
+            - 如果当前指令是被跳转指令延迟的:
+                - 如果同时是call类型, 则从上一条开始寻找(实际上会直接返回上一条指令call的函数)
+                - 否则这条指令作为被分支指令延迟的指令一定会被执行, 因此仍然从这条指令开始寻找
+            - 如果不是, 则正常从这条开始找
+        """
+        inst = inst.getPrevious()
+        if not inst.getFlowType().isCall():
+            inst = inst.getNext()
+        start = inst.getAddress().getOffset()
+
+    while True:
+        
+        if inst.getFlowType().isCall():
+            
+            callee: Function = None
+
+            if inst.getPcode()[-1].getMnemonic() == 'CALL':
+                callee = getFunctionAt(inst.getOpObjects(0)[0])
+            elif inst.getPcode()[-1].getMnemonic() == 'CALLIND':
+                
+                addrset = AddressSet(
+                    __SEARCH_STRING_CURRENT_PROGRAM, 
+                    toAddr(start), inst.getAddress()
+                )
+                
+                __CONSTANT_PROPOGATOR.flowConstants(
+                    __SEARCH_STRING_CURRENT_PROGRAM,
+                    toAddr(start),
+                    addrset,
+                    __SYMBOL_PROPOGATOR,
+                    getMonitor()
+                )
+
+                entry: int = __SYMBOL_PROPOGATOR.getRegisterValue(inst.getAddress(), inst.getOpObjects(0)[0]).getValue()
+                callee = getFunctionAt(toAddr(entry))
+
+            if callee:
+                return (callee, inst.getAddress().getOffset())
+
+        elif inst.getFlowType().isConditional():
+            break
+        
+        inst = inst.getNext()
+        if inst is None:
+            break
+    
+    return None
+
+
+"""
+    multi matching in one memory traversal -- Aho-Corasick API
+"""
+def searchMultiBytesAC(strings: Iterable[bytes]) -> list[tuple[bytes, Address]]:
+    """
+        AC自动机
+
+        TODO: 内存开销测试
+
+        strings: 一些待匹配字节串
+        return: list[(字节串, 起始地址)]
+    """
+    
+    AC = AhoCorasick(strings)
     res = []
     for memblock in __SEARCH_BLOCKS:
         memblock: MemoryBlock
@@ -66,10 +137,42 @@ def searchBytesAC(words: Iterable[bytes]) -> list[tuple[bytes, Address]]:
         res += [(bs, toAddr(st+off)) for bs, off in r]
     return res
 
+def searchMultiBytesReferences(strings: Iterable[bytes]) -> list[tuple[bytes, Reference]]:
+    """
+        搜索字节串的内存引用(getReferencesTo)
 
+        strings: 一些待搜索字节串
+        return: list[(字节串, 引用地址)] 
+    """
+    res = []
+    for w, addr in searchMultiBytesAC(strings):
+        for r in getReferencesTo(addr):
+            res.append((w, r))
+    return res
+
+def searchMultiUTF8StringReferences(strings: Iterable[str]) -> list[tuple[str, Reference]]:
+    """
+        将字符串进行UTF-8编码并搜索内存引用, 见searchMultiBytesReferences
+    """
+    return [
+        (w.decode('utf-8'), r) for w, r in searchMultiBytesReferences((_.encode('utf-8') for _ in strings))
+    ]
+
+def searchMultiUTF16StringReferences(strings: Iterable[str]) -> list[tuple[str, Reference]]:
+    """
+        将字符串进行UTF-16编码并搜索内存引用, 见searchMultiBytesReferences
+    """
+    return [
+        (w.decode('utf-16'), r) for w, r in searchMultiBytesReferences((_.encode('utf-16') for _ in strings))
+    ]
+
+
+"""
+    single string searching API
+"""
 def searchBytes(_bytes: bytes, _cache: bool=True) -> list[int]:
     """
-        搜索bytes
+        暴力搜索内存中指定字节串的起始地址
 
         _bytes: 待搜索bytes
         _cache: 缓冲搜索结果
@@ -115,10 +218,9 @@ def searchBytes(_bytes: bytes, _cache: bool=True) -> list[int]:
 
 def searchBytesReferences(_bytes: bytes) -> list[Reference]:
     """
-        搜索bytes的所有引用
+        搜索字节串的所有内存引用
 
         _bytes: 待搜索bytes
-
         return: list[搜索到的引用]
     """
 
@@ -131,94 +233,54 @@ def searchBytesReferences(_bytes: bytes) -> list[Reference]:
 
     return references
 
-def searchASCIIStringReferences(string: str) -> list[Reference]:
-    """
-        将str进行ascii编码并搜索引用
-    """
-    return searchBytesReferences(string.encode('ascii'))
-
 def searchUTF8StringReferences(string: str) -> list[Reference]:
     """
-        将str进行utf-8编码并搜索引用
+        将字符串进行UTF-16编码并搜索内存引用
     """
     return searchBytesReferences(string.encode('utf-8'))
 
 def searchUTF16StringReferences(string: str) -> list[Reference]:
     """
-        将str进行utf-16编码并搜索引用
+        将字符串进行UTF-16编码并搜索内存引用
     """
     return searchBytesReferences(string.encode('utf-16'))
 
-def searchParaming(string: str) -> list[tuple[Function, int]]:
+
+"""
+    utility
+"""
+def searchStrParamings(strings: Iterable[str]) -> list[tuple[str, Function, int]]:
     """
-        搜索常量字符串作为函数参数的引用
+        searchParamings -- 搜索常量串引用的函数参数
         Ghidra PARAM Reference + 向后搜索第一个引用
 
-        return: list[tuple[callee, callsite]]
+        searchStrParamings 搜索str作为函数参数的引用(方便, 但比searchBytesParamings慢, 因为需要尝试多种编码)
+        return: list[(string, callee, callsite)]
     """
+    paramings = []
+    for s, r in searchMultiUTF8StringReferences(strings) + searchMultiUTF16StringReferences(strings):
+        call =__searchCall(r.getFromAddress().getOffset())
+        if (call is not None) and \
+            (s, call[0], call[1]) not in paramings:
+                paramings.append((s, call[0], call[1]))
     
-    def searchCall(start: int) -> tuple[Function, int] | None:
-        """
-            从某个地址开始寻找一条call指令
-        """
-        
-        inst: Instruction = getInstructionAt(toAddr(start))
-        if str(__SEARCH_STRING_CURRENT_PROGRAM.getLanguageID().getIdAsString()).startswith('MIPS'):
-            """
-                - 如果当前指令是被跳转指令延迟的:
-                    - 如果同时是call类型, 则从上一条开始寻找(实际上会直接返回上一条指令call的函数)
-                    - 否则这条指令作为被分支指令延迟的指令一定会被执行, 因此仍然从这条指令开始寻找
-                - 如果不是, 则正常从这条开始找
-            """
-            inst = inst.getPrevious()
-            if not inst.getFlowType().isCall():
-                inst = inst.getNext()
-            start = inst.getAddress().getOffset()
+    return paramings
 
-        while True:
-            
-            if inst.getFlowType().isCall():
-                
-                callee: Function = None
+def searchBytesParamings(strings: Iterable[bytes]) -> list[tuple[str, Function, int]]:
+    """
+        searchParamings -- 搜索常量串引用的函数参数
+        Ghidra PARAM Reference + 向后搜索第一个引用
 
-                if inst.getPcode()[-1].getMnemonic() == 'CALL':
-                    callee = getFunctionAt(inst.getOpObjects(0)[0])
-                elif inst.getPcode()[-1].getMnemonic() == 'CALLIND':
-                    
-                    addrset = AddressSet(
-                        __SEARCH_STRING_CURRENT_PROGRAM, 
-                        toAddr(start), inst.getAddress()
-                    )
-                    
-                    __CONSTANT_PROPOGATOR.flowConstants(
-                        __SEARCH_STRING_CURRENT_PROGRAM,
-                        toAddr(start),
-                        addrset,
-                        __SYMBOL_PROPOGATOR,
-                        getMonitor()
-                    )
-
-                    entry: int = __SYMBOL_PROPOGATOR.getRegisterValue(inst.getAddress(), inst.getOpObjects(0)[0]).getValue()
-                    callee = getFunctionAt(toAddr(entry))
-
-                if callee:
-                    return (callee, inst.getAddress().getOffset())
-
-            elif inst.getFlowType().isConditional():
-                break
-            
-            inst = inst.getNext()
-            if inst is None:
-                break
-        
-        return None
+       searchBytesParamings: 搜索bytes作为函数参数的引用(比searchStrParamings快)
+       return: list[(bytes, callee, callsite)]
+    """
+    paramings = []
+    for w, r in searchMultiBytesReferences(strings):
+        call =__searchCall(r.getFromAddress().getOffset())
+        if (call is not None) and \
+            (w, call[0], call[1]) not in paramings:
+                paramings.append((w, call[0], call[1]))
     
-    __res = {
-        searchCall(r.getFromAddress().getOffset()) for r in \
-            searchUTF8StringReferences(string) + searchUTF16StringReferences(string) + searchASCIIStringReferences(string)
-    }
-    
-    return __res
-
+    return paramings
 
 __init()
