@@ -1,6 +1,6 @@
 # search_string
 
-Ghidra script 搜索常量字符串/字节串在内存中的使用
+Ghidra script 搜索常量字符串/字节串在内存中的使用 **单例**
 
 ## 接口
 1. 常量引用: (getReferencesTo)
@@ -15,7 +15,7 @@ Ghidra script 搜索常量字符串/字节串在内存中的使用
 ### 传参
 
 ```python
-from search_string.search_string import searchBytesParamings
+from search_string import searchBytesParamings
 
 alphabet = [b'wksun', b'wkmon', b'wktue', b'wkwed', b'wkthu', b'wkfri', b'wksat']
 for w, f, site in searchBytesParamings(alphabet):
@@ -33,7 +33,7 @@ for w, f, site in searchBytesParamings(alphabet):
 ### 常量引用
 
 ```python
-from search_string.search_string import *
+from search_string import *
 
 alphabet = [b'wksun', b'wkmon', b'wktue', b'wkwed', b'wkthu', b'wkfri', b'wksat']
 for w, addr in searchMultiBytesAC(alphabet):
