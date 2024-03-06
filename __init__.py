@@ -1,0 +1,3 @@
+from .search_string import searchASCIIStringReferences, searchUTF8StringReferences, searchUTF16StringReferences
+from .search_string import searchBytes, searchBytesAC, searchBytesReferences
+from .search_string import searchParaming
