@@ -35,6 +35,8 @@ __CONSTANT_PROPOGATOR:ConstantPropagationAnalyzer = None
 """
     flat API
 """
+getRegister = None
+getByte = None
 getFunctionAt = None
 getReferencesTo = None
 toRAMAddr = None
@@ -65,10 +67,12 @@ def reinit(program=None):
     __SYMBOL_PROPOGATOR.setParamRefCheck(True)
     
     # 加载program对应的flatapi
-    global getReferencesTo, toRAMAddr, getFunctionAt
+    global getReferencesTo, toRAMAddr, getFunctionAt, getByte, getRegister
     toRAMAddr = __SEARCH_STRING_CURRENT_PROGRAM.getAddressFactory().getAddressSpace('ram').getAddress
     getReferencesTo = __SEARCH_STRING_CURRENT_PROGRAM.getReferenceManager().getReferencesTo
     getFunctionAt = __SEARCH_STRING_CURRENT_PROGRAM.getListing().getFunctionAt
+    getByte = __SEARCH_STRING_CURRENT_PROGRAM.getMemory().getByte
+    getRegister = __SEARCH_STRING_CURRENT_PROGRAM.getRegister
 
 
 """
@@ -172,115 +176,163 @@ def searchMultiBytesReferences(strings: Iterable[bytes]) -> list[tuple[bytes, Re
             res.append((w, r))
     return res
 
-def searchMultiUTF8StringReferences(strings: Iterable[str]) -> list[tuple[str, Reference]]:
+def searchMultiUTF8StringReferences(strings: Iterable[str], _contains=False) -> list[tuple[str, Reference]]:
     """
         将字符串进行UTF-8编码并搜索内存引用, 见searchMultiBytesReferences
-    """
-    return [
-        (w.decode('utf-8'), r) for w, r in searchMultiBytesReferences((_.encode('utf-8') for _ in strings))
-    ]
 
-def searchMultiUTF16StringReferences(strings: Iterable[str]) -> list[tuple[str, Reference]]:
+        _contains: False
+    """
+    if not _contains:
+        return [
+            (w.decode('utf-8'), r) for w, r in searchMultiBytesReferences((_.encode('utf-8') for _ in strings))
+        ]
+    
+    """
+        contains mode
+
+        尝试定位完整字符串
+    """
+    res = []
+    for w, addr in searchMultiBytesAC((_.encode('utf-8') for _ in strings)):
+        w = w.decode('utf-8')
+        st, ed = addr.getOffset(), addr.getOffset() + len(w)
+
+        not_valid = False
+        while True:
+            _prev = toRAMAddr(st-1)
+
+            if _prev:
+                b = getByte(_prev)
+                if b is not None:
+                    b = b & 0xff
+                    if b == 0x0:
+                        break
+                    try:
+                        c = bytes([b]).decode('utf-8')
+                        w = c+w
+                        st -= 1
+                    except UnicodeDecodeError: # not in a valid utf-8 string !
+                        not_valid = True
+                        break
+        
+        if not_valid: # just drop this word
+            continue
+
+        while True:
+            _next = toRAMAddr(ed)
+
+            if _next:
+                b = getByte(_next)
+                if b is not None:
+                    b = b & 0xff
+                    if b == 0x0:
+                        break
+                    try:
+                        c = bytes([b]).decode('utf-8')
+                        w = w+c
+                        ed += 1
+                    except UnicodeDecodeError: # not in a valid utf-8 string !
+                        not_valid = True
+                        break
+        
+        if not_valid: # just drop this word
+            continue
+
+        for r in getReferencesTo(toRAMAddr(st)):
+            if (w, r) not in res:
+                res.append((w, r))
+    
+    return res
+
+def searchMultiUTF16StringReferences(strings: Iterable[str], _contains=False) -> list[tuple[str, Reference]]:
     """
         将字符串进行UTF-16编码并搜索内存引用, 见searchMultiBytesReferences
     """
-    return [
-        (w.decode('utf-16'), r) for w, r in searchMultiBytesReferences((_.encode('utf-16') for _ in strings))
-    ]
-
-
-"""
-    single string searching API
-"""
-def searchBytes(_bytes: bytes, _cache: bool=True) -> list[int]:
+    if not _contains:
+        return [
+            (w.decode('utf-16'), r) for w, r in searchMultiBytesReferences((_.encode('utf-16') for _ in strings))
+        ]
     """
-        暴力搜索内存中指定字节串的起始地址
+        contains mode
 
-        _bytes: 待搜索bytes
-        _cache: 缓冲搜索结果
-
-        return: list[<bytes起始地址>] 
+        尝试定位完整字符串
     """
-    cached = __search_cache.get(_bytes)
-    if cached is not None:
-        return tuple(cached)
+    res = []
+    for w, addr in searchMultiBytesAC((_.encode('utf-16') for _ in strings)):
+        w = w.decode('utf-16')
+        st, ed = addr.getOffset(), addr.getOffset() + len(w)
 
-    positions = set()
-    for memblock in __SEARCH_BLOCKS:
-        
-        st, ed = memblock.getStart().getOffset(), memblock.getEnd().getOffset() + 1
-        
-        if ed - st < len(_bytes):
-            continue
-        
-        q, q_start = [], st
-        for _ in range(st, st+len(_bytes)):
-           q.append(memblock.getByte(toRAMAddr(_)) & 0xff)
-        
+        not_valid = False
         while True:
-            
-            if bytes(q) == _bytes:
-                positions.add(q_start)
+            _prev0, _prev1 = toRAMAddr(st-2), toRAMAddr(st-1)
 
-            if q_start + len(_bytes) >= ed:
-                break
+            if _prev0 is not None and _prev1 is not None:
+                b0, b1 = getByte(_prev0), getByte(_prev1)
+                if b0 is not None and b1 is not None:
+                    b0, b1 = b0 & 0xff, b1 & 0xff
+                    if b0 == 0x0 and b1 ==0x0:
+                        break
+                    try:
+                        c = bytes([b0, b1]).decode('utf-16')
+                        w = c+w
+                        st -= 2
+                    except UnicodeDecodeError: # not in a valid utf-8 string !
+                        not_valid = True
+                        break
+        
+        if not_valid: # just drop this word
+            continue
 
-            q.pop(0)
-            try:
-                q.append(memblock.getByte(toRAMAddr(q_start+len(_bytes))) & 0xff)
-            except ValueError as ve:
-                print(hex(q_start+len(_bytes)))
-                assert False
-            q_start += 1
+        while True:
+            _next0, _next1 = toRAMAddr(ed), toRAMAddr(ed+1)
+
+            if _next0 is not None and _next1 is not None:
+                b0, b1 = getByte(_next0), getByte(_next1)
+                if b0 is not None and b1 is not None:
+                    b0, b1 = b0 & 0xff, b1 & 0xff
+                    if b0 == 0x0 and b1 ==0x0:
+                        break
+                    try:
+                        c = bytes([b0, b1]).decode('utf-16')
+                        w = w+c
+                        ed += 2
+                    except UnicodeDecodeError: # not in a valid utf-8 string !
+                        not_valid = True
+                        break
+        
+        if not_valid: # just drop this word
+            continue
+
+        for r in getReferencesTo(toRAMAddr(st)):
+            if (w, r) not in res:
+                res.append((w, r)) 
     
-    if _cache:
-        __search_cache[_bytes] = tuple(positions)
-    
-    return tuple(positions)
+    return res
 
-def searchBytesReferences(_bytes: bytes) -> list[Reference]:
-    """
-        搜索字节串的所有内存引用
-
-        _bytes: 待搜索bytes
-        return: list[搜索到的引用]
-    """
-
-    string_positions = searchBytes(_bytes, True)
-
-    references = []
-    for p in string_positions:
-        for r in getReferencesTo(toRAMAddr(p)):
-            references.append(r)
-
-    return references
-
-def searchUTF8StringReferences(string: str) -> list[Reference]:
-    """
-        将字符串进行UTF-16编码并搜索内存引用
-    """
-    return searchBytesReferences(string.encode('utf-8'))
-
-def searchUTF16StringReferences(string: str) -> list[Reference]:
-    """
-        将字符串进行UTF-16编码并搜索内存引用
-    """
-    return searchBytesReferences(string.encode('utf-16'))
 
 
 """
     utility
 """
-def searchStrParamings(strings: Iterable[str]) -> list[tuple[str, Function, int]]:
+def searchStrParamings(strings: Iterable[str], _utf8=True, _utf16=False, _contains=True) -> list[tuple[str, Function, int]]:
     """
         searchParamings -- 搜索常量串引用的函数参数
         Ghidra PARAM Reference + 向后搜索第一个引用
 
-        searchStrParamings 搜索str作为函数参数的引用(方便, 但比searchBytesParamings慢, 因为需要尝试多种编码)
+        searchStrParamings 搜索str作为函数参数的引用
+
+        _utf8: 匹配utf-8编码
+        _utf16: 匹配utf-16编码
+        _contains: 匹配包含该字符串的所有字符串
         return: list[(string, callee, callsite)]
+
+        NOTE: 非_contains模式下, 'abc'也将匹配到内存数据'abcd'
     """
+    searchingRange = (searchMultiUTF8StringReferences(strings, _contains=_contains) if _utf8 else []) + \
+                        (searchMultiUTF16StringReferences(strings, _contains=_contains) if _utf16 else [])
+
     paramings = []
-    for s, r in searchMultiUTF8StringReferences(strings) + searchMultiUTF16StringReferences(strings):
+    for s, r in searchingRange:
         call =__searchCall(r.getFromAddress().getOffset())
         if (call is not None) and \
             (s, call[0], call[1]) not in paramings:
@@ -293,7 +345,8 @@ def searchBytesParamings(strings: Iterable[bytes]) -> list[tuple[str, Function, 
         searchParamings -- 搜索常量串引用的函数参数
         Ghidra PARAM Reference + 向后搜索第一个引用
 
-       searchBytesParamings: 搜索bytes作为函数参数的引用(比searchStrParamings快)
+       searchBytesParamings: 搜索bytes作为函数参数的引用
+
        return: list[(bytes, callee, callsite)]
     """
     paramings = []
