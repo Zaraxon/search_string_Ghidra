@@ -1,13 +1,12 @@
 """
     搜索一个ASCII字符串是否在Memory中出现
     Ghidra version: 11.0
-
-    **单例模式, 仅处理current program**
 """
 from collections.abc import Iterable
+from typing import Callable, Any
 
 try:
-    from ghidra.ghidra_builtins import *
+    from ghidra.ghidra_builtins import getCurrentProgram, getMonitor
 except:
     pass
 
@@ -21,10 +20,11 @@ from ghidra.app.plugin.core.analysis import ConstantPropagationAnalyzer
 
 from ghidra.util.classfinder import ClassSearcher
 
+
 from .AhoCorasick import AhoCorasick
 
 
-__SEARCH_STRING_CURRENT_PROGRAM: Program = getCurrentProgram()
+__SEARCH_STRING_CURRENT_PROGRAM: Program = None
 
 __SEARCH_BLOCKS:list[MemoryBlock] = []
 __search_cache:dict[bytes, Iterable[Reference]] = {}
@@ -32,25 +32,44 @@ __search_cache:dict[bytes, Iterable[Reference]] = {}
 __SYMBOL_PROPOGATOR:SymbolicPropogator = None
 __CONSTANT_PROPOGATOR:ConstantPropagationAnalyzer = None
 
-def __init():
+"""
+    flat API
+"""
+getFunctionAt = None
+getReferencesTo = None
+toRAMAddr = None
+
+"""
+    configure API
+"""
+def reinit(program=None):
+
+    global __SEARCH_STRING_CURRENT_PROGRAM
+    __SEARCH_STRING_CURRENT_PROGRAM = getCurrentProgram() if program is None else program
     
     # 添加所有可读的MemoryBlock到搜索空间
     memory: Memory = __SEARCH_STRING_CURRENT_PROGRAM.getMemory()
     for memblock in memory.getBlocks():
         if memblock.isRead() and memblock.isInitialized():
             __SEARCH_BLOCKS.append(memblock)
-    
-    global __CONSTANT_PROPOGATOR, __SYMBOL_PROPOGATOR
 
+    # 设置常量传播分析器
+    global __CONSTANT_PROPOGATOR, __SYMBOL_PROPOGATOR
     for a in ClassSearcher.getInstances(ConstantPropagationAnalyzer):
         if a.canAnalyze(__SEARCH_STRING_CURRENT_PROGRAM):
             __CONSTANT_PROPOGATOR = a
             break
     else:
         assert 0
-
     __SYMBOL_PROPOGATOR = SymbolicPropogator(__SEARCH_STRING_CURRENT_PROGRAM)
     __SYMBOL_PROPOGATOR.setParamRefCheck(True)
+    
+    # 加载program对应的flatapi
+    global getReferencesTo, toRAMAddr, getFunctionAt
+    toRAMAddr = __SEARCH_STRING_CURRENT_PROGRAM.getAddressFactory().getAddressSpace('ram').getAddress
+    getReferencesTo = __SEARCH_STRING_CURRENT_PROGRAM.getReferenceManager().getReferencesTo
+    getFunctionAt = __SEARCH_STRING_CURRENT_PROGRAM.getListing().getFunctionAt
+
 
 """
     internal API
@@ -61,7 +80,10 @@ def __searchCall(start: int) -> tuple[Function, int] | None:
         从某个地址开始寻找一条call指令
     """
     
-    inst: Instruction = getInstructionAt(toAddr(start))
+    inst: Instruction = __SEARCH_STRING_CURRENT_PROGRAM.getListing().getInstructionAt(toRAMAddr(start))
+    if inst is None:
+        return None
+
     if str(__SEARCH_STRING_CURRENT_PROGRAM.getLanguageID().getIdAsString()).startswith('MIPS'):
         """
             - 如果当前指令是被跳转指令延迟的:
@@ -86,19 +108,19 @@ def __searchCall(start: int) -> tuple[Function, int] | None:
                 
                 addrset = AddressSet(
                     __SEARCH_STRING_CURRENT_PROGRAM, 
-                    toAddr(start), inst.getAddress()
+                    toRAMAddr(start), inst.getAddress()
                 )
                 
                 __CONSTANT_PROPOGATOR.flowConstants(
                     __SEARCH_STRING_CURRENT_PROGRAM,
-                    toAddr(start),
+                    toRAMAddr(start),
                     addrset,
                     __SYMBOL_PROPOGATOR,
                     getMonitor()
                 )
 
-                entry: int = __SYMBOL_PROPOGATOR.getRegisterValue(inst.getAddress(), inst.getOpObjects(0)[0]).getValue()
-                callee = getFunctionAt(toAddr(entry))
+                regval: int = __SYMBOL_PROPOGATOR.getRegisterValue(inst.getAddress(), inst.getOpObjects(0)[0])
+                callee = getFunctionAt(toRAMAddr(regval.getValue())) if regval else None
 
             if callee:
                 return (callee, inst.getAddress().getOffset())
@@ -132,9 +154,9 @@ def searchMultiBytesAC(strings: Iterable[bytes]) -> list[tuple[bytes, Address]]:
         memblock: MemoryBlock
         st, ed = memblock.getStart().getOffset(), memblock.getEnd().getOffset()+1
         r = AC.query((
-            memblock.getByte(toAddr(off)) & 0xff for off in range(st, ed)
+            memblock.getByte(toRAMAddr(off)) & 0xff for off in range(st, ed)
         ))
-        res += [(bs, toAddr(st+off)) for bs, off in r]
+        res += [(bs, toRAMAddr(st+off)) for bs, off in r]
     return res
 
 def searchMultiBytesReferences(strings: Iterable[bytes]) -> list[tuple[bytes, Reference]]:
@@ -193,7 +215,7 @@ def searchBytes(_bytes: bytes, _cache: bool=True) -> list[int]:
         
         q, q_start = [], st
         for _ in range(st, st+len(_bytes)):
-           q.append(memblock.getByte(toAddr(_)) & 0xff)
+           q.append(memblock.getByte(toRAMAddr(_)) & 0xff)
         
         while True:
             
@@ -205,7 +227,7 @@ def searchBytes(_bytes: bytes, _cache: bool=True) -> list[int]:
 
             q.pop(0)
             try:
-                q.append(memblock.getByte(toAddr(q_start+len(_bytes))) & 0xff)
+                q.append(memblock.getByte(toRAMAddr(q_start+len(_bytes))) & 0xff)
             except ValueError as ve:
                 print(hex(q_start+len(_bytes)))
                 assert False
@@ -228,7 +250,7 @@ def searchBytesReferences(_bytes: bytes) -> list[Reference]:
 
     references = []
     for p in string_positions:
-        for r in getReferencesTo(toAddr(p)):
+        for r in getReferencesTo(toRAMAddr(p)):
             references.append(r)
 
     return references
@@ -283,4 +305,4 @@ def searchBytesParamings(strings: Iterable[bytes]) -> list[tuple[str, Function, 
     
     return paramings
 
-__init()
+reinit()
